@@ -18,7 +18,7 @@ struct _FlBinaryMessenger {
 
   FlEngine* engine;
 
-  // PlatformMessageHandler keyed by channel name
+  // PlatformMessageHandler keyed by channel name.
   GHashTable* platform_message_handlers;
 };
 
@@ -27,7 +27,7 @@ G_DEFINE_TYPE(FlBinaryMessenger, fl_binary_messenger, G_TYPE_OBJECT)
 struct _FlBinaryMessengerResponseHandle {
   GObject parent_instance;
 
-  // Messenger sending response on
+  // Messenger sending response on.
   FlBinaryMessenger* messenger;
 
   // Handle to send the response with. This is cleared to nullptr when it is
@@ -76,26 +76,34 @@ static FlBinaryMessengerResponseHandle* fl_binary_messenger_response_handle_new(
 typedef struct {
   FlBinaryMessengerMessageHandler message_handler;
   gpointer message_handler_data;
+  GDestroyNotify message_handler_destroy_notify;
 } PlatformMessageHandler;
 
 static PlatformMessageHandler* platform_message_handler_new(
     FlBinaryMessengerMessageHandler handler,
-    gpointer user_data) {
+    gpointer user_data,
+    GDestroyNotify destroy_notify) {
   PlatformMessageHandler* self = static_cast<PlatformMessageHandler*>(
       g_malloc0(sizeof(PlatformMessageHandler)));
   self->message_handler = handler;
   self->message_handler_data = user_data;
+  self->message_handler_destroy_notify = destroy_notify;
   return self;
 }
 
 static void platform_message_handler_free(gpointer data) {
   PlatformMessageHandler* self = static_cast<PlatformMessageHandler*>(data);
+  if (self->message_handler_destroy_notify)
+    self->message_handler_destroy_notify(self->message_handler_data);
   g_free(self);
 }
 
 static void engine_weak_notify_cb(gpointer user_data, GObject* object) {
   FlBinaryMessenger* self = FL_BINARY_MESSENGER(user_data);
   self->engine = nullptr;
+
+  // Disconnect any handlers.
+  g_hash_table_remove_all(self->platform_message_handlers);
 }
 
 static gboolean fl_binary_messenger_platform_message_cb(
@@ -151,7 +159,7 @@ FlBinaryMessenger* fl_binary_messenger_new(FlEngine* engine) {
   g_object_weak_ref(G_OBJECT(engine), engine_weak_notify_cb, self);
 
   fl_engine_set_platform_message_handler(
-      engine, fl_binary_messenger_platform_message_cb, self);
+      engine, fl_binary_messenger_platform_message_cb, self, NULL);
 
   return self;
 }
@@ -160,15 +168,30 @@ G_MODULE_EXPORT void fl_binary_messenger_set_message_handler_on_channel(
     FlBinaryMessenger* self,
     const gchar* channel,
     FlBinaryMessengerMessageHandler handler,
-    gpointer user_data) {
+    gpointer user_data,
+    GDestroyNotify destroy_notify) {
   g_return_if_fail(FL_IS_BINARY_MESSENGER(self));
   g_return_if_fail(channel != nullptr);
 
-  if (handler != nullptr)
-    g_hash_table_replace(self->platform_message_handlers, g_strdup(channel),
-                         platform_message_handler_new(handler, user_data));
-  else
+  // Don't set handlers if engine already gone.
+  if (self->engine == nullptr) {
+    if (handler != nullptr) {
+      g_warning(
+          "Attempted to set message handler on an FlBinaryMessenger without an "
+          "engine");
+    }
+    if (destroy_notify != nullptr)
+      destroy_notify(user_data);
+    return;
+  }
+
+  if (handler != nullptr) {
+    g_hash_table_replace(
+        self->platform_message_handlers, g_strdup(channel),
+        platform_message_handler_new(handler, user_data, destroy_notify));
+  } else {
     g_hash_table_remove(self->platform_message_handlers, channel);
+  }
 }
 
 G_MODULE_EXPORT gboolean fl_binary_messenger_send_response(
